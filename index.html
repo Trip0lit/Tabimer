@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Dans le tableau</title>
+<style>
+  :root {
+    --bg: #0f0a07;
+    --ink: #f3e6cf;
+    --muted: #b9a78a;
+    --gold: #c9a24a;
+    --gold-deep: #8a6a24;
+    --panel: rgba(18, 12, 8, 0.78);
+  }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg: #0f0a07; } }
+  :root[data-theme="dark"] { --bg: #0f0a07; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); color: var(--ink);
+    font-family: "Cormorant Garamond", Georgia, "Times New Roman", serif; }
+  canvas { display: block; touch-action: none; }
+  #intro { position: fixed; inset: 0; display: grid; place-items: center; padding: 16px;
+    background: radial-gradient(ellipse at center, rgba(15,10,7,.35), rgba(15,10,7,.92)); z-index: 5;
+    transition: opacity .8s ease; }
+  #intro.hidden { opacity: 0; pointer-events: none; }
+  .card { max-width: 520px; width: 100%; text-align: center; padding: 28px 24px; background: var(--panel);
+    border: 1px solid var(--gold-deep); outline: 1px solid rgba(201,162,74,.25); outline-offset: 5px;
+    backdrop-filter: blur(4px); }
+  h1 { font-weight: 500; font-size: clamp(28px, 6vw, 40px); margin: 0 0 6px; letter-spacing: .02em; color: var(--gold); }
+  .sub { color: var(--muted); font-style: italic; margin: 0 0 20px; font-size: 18px; }
+  .keys { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; text-align: left; font-size: 17px;
+    margin: 0 auto 22px; max-width: 360px; }
+  kbd { font-family: inherit; border: 1px solid var(--gold-deep); padding: 0 6px; border-radius: 3px; font-size: 15px;
+    color: var(--ink); background: rgba(201,162,74,.08); white-space: nowrap; }
+  button.enter { font: inherit; font-size: 20px; color: #1a120a; background: linear-gradient(#e2c06c, var(--gold));
+    border: 1px solid #f0d9a0; padding: 10px 26px; cursor: pointer; letter-spacing: .04em; }
+  button.enter:disabled { opacity: .5; cursor: wait; }
+  #hud { position: fixed; left: 16px; bottom: 16px; z-index: 3; font-size: 15px; color: var(--muted);
+    background: var(--panel); padding: 6px 10px; border: 1px solid rgba(138,106,36,.6); pointer-events: none;
+    opacity: 0; transition: opacity .6s; }
+  #hud.on { opacity: .9; }
+  #tools { position: fixed; right: 16px; top: 16px; z-index: 3; display: flex; gap: 8px; opacity: 0; transition: opacity .6s; }
+  #tools.on { opacity: 1; }
+  #tools button { font: inherit; font-size: 15px; color: var(--ink); background: var(--panel);
+    border: 1px solid var(--gold-deep); padding: 6px 12px; cursor: pointer; }
+  #tools button[aria-pressed="true"] { background: rgba(201,162,74,.3); }
+  #stick { position: fixed; left: 24px; bottom: 56px; width: 120px; height: 120px; border-radius: 50%;
+    border: 1px solid rgba(201,162,74,.5); background: rgba(18,12,8,.35); z-index: 3; display: none; touch-action: none; }
+  #stick i { position: absolute; left: 50%; top: 50%; width: 48px; height: 48px; margin: -24px 0 0 -24px;
+    border-radius: 50%; background: rgba(201,162,74,.55); }
+  .touch #stick { display: block; }
+  .touch .desk { display: none; }
+  .mob { display: none; }
+  .touch .mob { display: contents; }
+  #veil { position: fixed; inset: 0; pointer-events: none; z-index: 2;
+    box-shadow: inset 0 0 160px 40px rgba(10,6,3,.55); }
+</style>
+<script type="importmap">
+{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.min.js" } }
+</script>
+</head>
+<body>
+<div id="veil"></div>
+<div id="intro">
+  <div class="card">
+    <h1>Dans le tableau</h1>
+    <p class="sub">Une scène figée, reconstruite en profondeur. Avancez parmi les personnages.</p>
+    <div class="keys">
+      <span class="desk"><kbd>Z Q S D</kbd> / <kbd>W A S D</kbd></span><span class="desk">se déplacer</span>
+      <span class="desk"><kbd>Souris</kbd></span><span class="desk">regarder (clic pour capturer)</span>
+      <span class="desk"><kbd>Espace</kbd> <kbd>Maj</kbd></span><span class="desk">monter / descendre</span>
+      <span class="desk"><kbd>Molette</kbd></span><span class="desk">avancer / reculer</span>
+      <span class="desk"><kbd>R</kbd></span><span class="desk">revenir au point de vue du peintre</span>
+      <span class="desk"><kbd>T</kbd></span><span class="desk">visite guidée</span>
+      <span class="mob">Joystick</span><span class="mob">se déplacer</span>
+      <span class="mob">Glisser</span><span class="mob">regarder</span>
+    </div>
+    <button class="enter" id="enter" disabled>Chargement…</button>
+  </div>
+</div>
+<div id="hud"><span class="desk">ZQSD · souris · R : recentrer · T : visite · Échap : libérer</span><span class="mob">Joystick : avancer · glisser : regarder</span></div>
+<div id="tools">
+  <button id="btnTour" aria-pressed="false">Visite</button>
+  <button id="btnReset">Recentrer</button>
+</div>
+<div id="stick"><i></i></div>
+
+<script type="module">
+import * as THREE from 'three';
+
+const isTouch = matchMedia('(pointer: coarse)').matches;
+if (isTouch) document.documentElement.classList.add('touch');
+
+// ---------- painting camera model ----------
+const IMG_ASPECT = 1000 / 699;
+const VFOV = 42;                                   // vertical field of view of the painter's "camera"
+const TY = Math.tan(THREE.MathUtils.degToRad(VFOV / 2));
+const TX = TY * IMG_ASPECT;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.body.prepend(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0f0a07);
+const camera = new THREE.PerspectiveCamera(VFOV, innerWidth / innerHeight, 0.05, 200);
+camera.rotation.order = 'YXZ';
+
+function fitFov() {
+  const a = innerWidth / innerHeight;
+  camera.aspect = a;
+  // "cover": the painting always fills the screen from the painter's viewpoint
+  camera.fov = a > IMG_ASPECT ? THREE.MathUtils.radToDeg(2 * Math.atan(TX / a)) : VFOV;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+}
+fitFov();
+addEventListener('resize', fitFov);
+
+// ---------- load assets ----------
+const loader = new THREE.TextureLoader();
+const loadTex = (url) => new Promise((res, rej) => loader.load(url, (t) => {
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.anisotropy = renderer.capabilities.getMaxAnisotropy();
+  t.minFilter = THREE.LinearMipmapLinearFilter;
+  res(t);
+}, undefined, rej));
+
+const [meta, depthBuf, texFg, texBg] = await Promise.all([
+  fetch('assets/meta.json').then((r) => r.json()),
+  fetch('assets/depth.bin').then((r) => r.arrayBuffer()),
+  loadTex('assets/painting.jpg'),
+  loadTex('assets/background.jpg'),
+]);
+
+const GW = meta.gw, GH = meta.gh, N = GW * GH;
+const raw = new Uint16Array(depthBuf);
+const zFg = new Float32Array(N), zBg = new Float32Array(N);
+for (let i = 0; i < N; i++) { zFg[i] = raw[i] / 1000; zBg[i] = raw[N + i] / 1000; }
+
+// back-project every pixel of the canvas along the painter's line of sight
+function buildMesh(z, tex, cutRatio) {
+  const pos = new Float32Array(N * 3), uv = new Float32Array(N * 2);
+  for (let j = 0; j < GH; j++) for (let i = 0; i < GW; i++) {
+    const k = j * GW + i, u = i / (GW - 1), v = j / (GH - 1), d = z[k];
+    pos[k * 3] = (u - 0.5) * 2 * TX * d;
+    pos[k * 3 + 1] = (0.5 - v) * 2 * TY * d;
+    pos[k * 3 + 2] = -d;
+    uv[k * 2] = u; uv[k * 2 + 1] = 1 - v;
+  }
+  const idx = [];
+  const ok = (a, b, c) => {
+    if (!cutRatio) return true;
+    const mx = Math.max(z[a], z[b], z[c]), mn = Math.min(z[a], z[b], z[c]);
+    return mx / mn < cutRatio;      // tear the surface at depth discontinuities
+  };
+  for (let j = 0; j < GH - 1; j++) for (let i = 0; i < GW - 1; i++) {
+    const a = j * GW + i, b = a + 1, c = a + GW, d = c + 1;
+    if (ok(a, c, b)) idx.push(a, c, b);
+    if (ok(b, c, d)) idx.push(b, c, d);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  g.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+  g.setIndex(new THREE.BufferAttribute(new Uint32Array(idx), 1));
+  const m = new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide });
+  return new THREE.Mesh(g, m);
+}
+
+const bgMesh = buildMesh(zBg, texBg, 0);
+const fgMesh = buildMesh(zFg, texFg, 1.07);
+bgMesh.renderOrder = 0; fgMesh.renderOrder = 1;
+scene.add(bgMesh, fgMesh);
+
+// ---------- controls ----------
+const HOME = { x: 0, y: 0, z: 0, yaw: 0, pitch: 0 };
+const state = { ...HOME };
+const target = { ...HOME };
+const BOUNDS = { x: [-2.6, 2.6], y: [-0.8, 1.3], z: [-4.6, 1.2] };
+const clamp = THREE.MathUtils.clamp;
+const keys = new Set();
+let tour = null;
+
+addEventListener('keydown', (e) => {
+  if (e.repeat && !/^(Key[WASDZQ]|Arrow)/.test(e.code)) return;
+  keys.add(e.code);
+  if (e.code === 'KeyR') resetView();
+  if (e.code === 'KeyT') toggleTour();
+  if (e.code === 'Space') e.preventDefault();
+});
+addEventListener('keyup', (e) => keys.delete(e.code));
+addEventListener('blur', () => keys.clear());
+
+function look(dx, dy, s = 0.0022) {
+  stopTour();
+  target.yaw = clamp(target.yaw - dx * s, -1.35, 1.35);
+  target.pitch = clamp(target.pitch - dy * s, -1.0, 1.0);
+}
+
+const cvs = renderer.domElement;
+let dragging = false, lx = 0, ly = 0;
+cvs.addEventListener('pointerdown', (e) => {
+  if (e.pointerType === 'mouse' && !isTouch) { cvs.requestPointerLock?.(); return; }
+  dragging = true; lx = e.clientX; ly = e.clientY; cvs.setPointerCapture(e.pointerId);
+});
+cvs.addEventListener('pointermove', (e) => {
+  if (document.pointerLockElement === cvs) return look(e.movementX, e.movementY);
+  if (!dragging) return;
+  look((e.clientX - lx) * 1.6, (e.clientY - ly) * 1.6); lx = e.clientX; ly = e.clientY;
+});
+cvs.addEventListener('pointerup', () => { dragging = false; });
+addEventListener('wheel', (e) => { stopTour(); moveLocal(0, -e.deltaY * 0.004); }, { passive: true });
+
+// virtual joystick (touch)
+const stick = document.getElementById('stick'), knob = stick.firstElementChild;
+const joy = { x: 0, y: 0, id: null };
+stick.addEventListener('pointerdown', (e) => { joy.id = e.pointerId; stick.setPointerCapture(e.pointerId); joyMove(e); });
+stick.addEventListener('pointermove', (e) => { if (e.pointerId === joy.id) joyMove(e); });
+const joyEnd = () => { joy.id = null; joy.x = joy.y = 0; knob.style.transform = ''; };
+stick.addEventListener('pointerup', joyEnd); stick.addEventListener('pointercancel', joyEnd);
+function joyMove(e) {
+  stopTour();
+  const r = stick.getBoundingClientRect();
+  let x = (e.clientX - r.left - r.width / 2) / (r.width / 2), y = (e.clientY - r.top - r.height / 2) / (r.height / 2);
+  const l = Math.hypot(x, y); if (l > 1) { x /= l; y /= l; }
+  joy.x = x; joy.y = y; knob.style.transform = `translate(${x * 36}px, ${y * 36}px)`;
+}
+
+function moveLocal(strafe, fwd, up = 0) {
+  const s = Math.sin(target.yaw), c = Math.cos(target.yaw);
+  target.x = clamp(target.x + strafe * c - fwd * s, ...BOUNDS.x);
+  target.z = clamp(target.z - strafe * s - fwd * c, ...BOUNDS.z);
+  target.y = clamp(target.y + up, ...BOUNDS.y);
+}
+function resetView() { stopTour(); Object.assign(target, HOME); }
+
+// guided tour: a slow walk through the room and back to the painter's eye
+const TOUR = [
+  [0, 0, 0, 0, 0], [1.6, -0.2, -1.8, 0.35, -0.08], [1.2, -0.3, -3.6, -0.2, -0.1],
+  [-0.6, -0.25, -4.2, 0.15, 0.02], [-1.8, -0.1, -3.2, 0.45, 0.08], [-1.4, 0.4, -1.5, -0.35, 0.18],
+  [0, 0, 0, 0, 0],
+].map(([x, y, z, yaw, pitch]) => ({ x, y, z, yaw, pitch }));
+function toggleTour() { tour ? stopTour() : (tour = { t: 0 }, setTourBtn(true)); }
+function stopTour() { if (tour) { tour = null; setTourBtn(false); } }
+const btnTour = document.getElementById('btnTour');
+function setTourBtn(on) { btnTour.setAttribute('aria-pressed', on); btnTour.textContent = on ? 'Arrêter' : 'Visite'; }
+btnTour.onclick = toggleTour;
+document.getElementById('btnReset').onclick = resetView;
+
+function catmull(p0, p1, p2, p3, t) {
+  const t2 = t * t, t3 = t2 * t;
+  return 0.5 * (2 * p1 + (-p0 + p2) * t + (2 * p0 - 5 * p1 + 4 * p2 - p3) * t2 + (-p0 + 3 * p1 - 3 * p2 + p3) * t3);
+}
+function tourPose(t) {
+  const n = TOUR.length - 1, f = Math.min(t, n - 1e-6), i = Math.floor(f), u = f - i;
+  const P = (k) => TOUR[clamp(k, 0, n)];
+  const e = u * u * (3 - 2 * u) * 0.35 + u * 0.65;
+  const out = {};
+  for (const k of ['x', 'y', 'z', 'yaw', 'pitch']) out[k] = catmull(P(i - 1)[k], P(i)[k], P(i + 1)[k], P(i + 2)[k], e);
+  return out;
+}
+
+// keep the gaze inside the painted world: a point 8 m ahead must stay within the canvas' frustum
+function inside(yaw, pitch) {
+  const D = 8, cp = Math.cos(pitch);
+  const px = target.x - Math.sin(yaw) * cp * D, pz = target.z - Math.cos(yaw) * cp * D, py = target.y + Math.sin(pitch) * D;
+  return pz < -1 && Math.abs(px / -pz) < TX * 0.62 && Math.abs(py / -pz) < TY * 0.62;
+}
+function constrainView() {
+  for (let n = 0; n < 40 && !inside(target.yaw, target.pitch); n++) {
+    target.yaw *= 0.95; target.pitch *= 0.95;
+  }
+}
+
+// ---------- loop ----------
+const clock = new THREE.Clock();
+function frame() {
+  const dt = Math.min(clock.getDelta(), 0.05);
+  if (tour) {
+    tour.t += dt * 0.11;
+    Object.assign(target, tourPose(tour.t));
+    if (tour.t >= TOUR.length - 1) stopTour();
+  } else {
+    const sp = (keys.has('ShiftLeft') && keys.has('ControlLeft') ? 3 : 1.6) * dt;
+    let f = 0, s = 0, u = 0;
+    if (keys.has('KeyW') || keys.has('KeyZ') || keys.has('ArrowUp')) f += 1;
+    if (keys.has('KeyS') || keys.has('ArrowDown')) f -= 1;
+    if (keys.has('KeyA') || keys.has('KeyQ')) s -= 1;
+    if (keys.has('KeyD')) s += 1;
+    if (keys.has('ArrowLeft')) target.yaw = clamp(target.yaw + 1.4 * dt, -1.35, 1.35);
+    if (keys.has('ArrowRight')) target.yaw = clamp(target.yaw - 1.4 * dt, -1.35, 1.35);
+    if (keys.has('Space')) u += 1;
+    if (keys.has('ShiftLeft') || keys.has('ShiftRight')) u -= 1;
+    f -= joy.y; s += joy.x;
+    if (f || s || u) moveLocal(s * sp, f * sp, u * sp * 0.7);
+  }
+  if (!tour) constrainView();
+  const k = 1 - Math.exp(-dt * (tour ? 20 : 9));
+  for (const key of ['x', 'y', 'z', 'yaw', 'pitch']) state[key] += (target[key] - state[key]) * k;
+  camera.position.set(state.x, state.y, state.z);
+  camera.rotation.set(state.pitch, state.yaw, 0);
+  renderer.render(scene, camera);
+  requestAnimationFrame(frame);
+}
+frame();
+
+// ---------- intro ----------
+const enter = document.getElementById('enter');
+enter.disabled = false; enter.textContent = 'Entrer dans le tableau';
+enter.onclick = () => {
+  document.getElementById('intro').classList.add('hidden');
+  document.getElementById('hud').classList.add('on');
+  document.getElementById('tools').classList.add('on');
+  if (!isTouch) cvs.requestPointerLock?.();
+};
+window.__view = { target, state, toggleTour, tourPose };
+</script>
+</body>
+</html>
