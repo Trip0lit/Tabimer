@@ -130,15 +130,22 @@ const loadTex = (url) => new Promise((res, rej) => loader.load(url, (t) => {
 
 const [meta, depthBuf, texFg, texBg] = await Promise.all([
   fetch('assets/meta.json').then((r) => r.json()),
-  fetch('assets/depth.bin').then((r) => r.arrayBuffer()),
+  fetch('assets/depth.png').then((r) => r.blob())
+    .then((b) => createImageBitmap(b, { colorSpaceConversion: 'none', premultiplyAlpha: 'none' })),
   loadTex('assets/painting.jpg'),
   loadTex('assets/background.jpg'),
 ]);
 
 const GW = meta.gw, GH = meta.gh, N = GW * GH;
-const raw = new Uint16Array(depthBuf);
+// depth.png: foreground rows then background rows, millimetres packed as R = high byte, G = low byte
+const dc = new OffscreenCanvas(GW, GH * 2).getContext('2d', { willReadFrequently: true });
+dc.drawImage(depthBuf, 0, 0);
+const px = dc.getImageData(0, 0, GW, GH * 2).data;
 const zFg = new Float32Array(N), zBg = new Float32Array(N);
-for (let i = 0; i < N; i++) { zFg[i] = raw[i] / 1000; zBg[i] = raw[N + i] / 1000; }
+for (let i = 0; i < N; i++) {
+  zFg[i] = (px[i * 4] * 256 + px[i * 4 + 1]) / 1000;
+  zBg[i] = (px[(N + i) * 4] * 256 + px[(N + i) * 4 + 1]) / 1000;
+}
 
 // back-project every pixel of the canvas along the painter's line of sight
 function buildMesh(z, tex, cutRatio) {

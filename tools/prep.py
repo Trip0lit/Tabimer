@@ -88,7 +88,9 @@ GW,GH=600,420
 def g(a): return cv2.resize(a,(GW,GH),interpolation=cv2.INTER_NEAREST if a is z else cv2.INTER_AREA)
 zf=cv2.resize(z,(GW,GH),interpolation=cv2.INTER_NEAREST); zbf=cv2.resize(zb,(GW,GH),interpolation=cv2.INTER_AREA)
 buf=np.concatenate([np.clip(zf*1000,0,65535).astype('<u2').ravel(),np.clip(zbf*1000,0,65535).astype('<u2').ravel()])
-buf.tofile(OUT+'depth.bin')
+v=buf.reshape(2*GH,GW)   # foreground rows, then background rows; R=high byte, G=low byte
+png=np.zeros((2*GH,GW,3),np.uint8); png[...,2]=v>>8; png[...,1]=v&255
+cv2.imwrite(OUT+'depth.png',png)
 json.dump({'gw':GW,'gh':GH,'zmin':float(z.min()),'zmax':float(z.max())},open(OUT+'meta.json','w'))
 print(z.min(),z.max(),zb.min(),zb.max(),mask.mean())
 cv2.imwrite('bgprev.jpg',bgimg)

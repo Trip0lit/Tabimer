@@ -13,7 +13,7 @@ Sur mobile : joystick + glisser.
 1. `tools/depth.py` : estimation de profondeur monoculaire (Depth Anything V2, ONNX) sur le tableau.
 2. `tools/prep.py` : nettoyage de la profondeur (bords francs, lissage par objet, colonnes redressées et arrondies),
    création d'un calque d'arrière-plan sans personnages ni colonnes (motifs prolongés en miroir) pour combler
-   ce qui se dévoile quand on se déplace, export de `assets/`.
+   ce qui se dévoile quand on se déplace, export de `assets/` (profondeur en mm dans `depth.png` : R = octet haut, G = octet bas).
 3. `index.html` : Three.js reprojette chaque pixel le long du rayon de vue du peintre → deux maillages
    (premier plan déchiré aux discontinuités + arrière-plan continu), texturés avec la peinture d'origine.
 
