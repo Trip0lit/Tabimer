@@ -64,12 +64,13 @@
 <div id="intro">
   <div class="card">
     <h1>Dans le tableau</h1>
-    <p class="sub">Une scène figée, reconstruite en profondeur. Avancez parmi les personnages.</p>
+    <p class="sub">La salle du tableau, modélisée en 3D. Parcourez la cour, passez entre les colonnes, retournez-vous.</p>
     <div class="keys">
       <span class="desk"><kbd>Z Q S D</kbd> / <kbd>W A S D</kbd></span><span class="desk">se déplacer</span>
       <span class="desk"><kbd>Souris</kbd></span><span class="desk">regarder (clic pour capturer)</span>
       <span class="desk"><kbd>Espace</kbd> <kbd>Maj</kbd></span><span class="desk">monter / descendre</span>
       <span class="desk"><kbd>Molette</kbd></span><span class="desk">avancer / reculer</span>
+      <span class="desk"><kbd>Ctrl</kbd></span><span class="desk">courir</span>
       <span class="desk"><kbd>R</kbd></span><span class="desk">revenir au point de vue du peintre</span>
       <span class="desk"><kbd>T</kbd></span><span class="desk">visite guidée</span>
       <span class="mob">Joystick</span><span class="mob">se déplacer</span>
@@ -91,108 +92,240 @@ import * as THREE from 'three';
 const isTouch = matchMedia('(pointer: coarse)').matches;
 if (isTouch) document.documentElement.classList.add('touch');
 
-// ---------- painting camera model ----------
-const IMG_ASPECT = 1000 / 699;
-const VFOV = 42;                                   // vertical field of view of the painter's "camera"
-const TY = Math.tan(THREE.MathUtils.degToRad(VFOV / 2));
-const TX = TY * IMG_ASPECT;
-
+// ---------- assets ----------
 const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.setSize(innerWidth, innerHeight);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 document.body.prepend(renderer.domElement);
 
+const loader = new THREE.TextureLoader();
+const loadTex = (url) => new Promise((res, rej) => loader.load(url, (t) => {
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.anisotropy = renderer.capabilities.getMaxAnisotropy();
+  res(t);
+}, undefined, rej));
+const [meta, depthImg, texPainting, texRoom, texIds] = await Promise.all([
+  fetch('assets/meta.json').then((r) => r.json()),
+  fetch('assets/depth.png').then((r) => r.blob())
+    .then((b) => createImageBitmap(b, { colorSpaceConversion: 'none', premultiplyAlpha: 'none' })),
+  loadTex('assets/painting.jpg'),
+  loadTex('assets/room.jpg'),
+  new Promise((res, rej) => loader.load('assets/cards.png', (t) => {
+    t.colorSpace = THREE.NoColorSpace; t.magFilter = t.minFilter = THREE.NearestFilter; t.generateMipmaps = false; res(t);
+  }, undefined, rej)),
+]);
+
+// ---------- the painter's camera: one-point perspective, vanishing point (cx, cy), focal f ----------
+const { w: IW, h: IH, f: F, cx: CX, cy: CY, gw: GW, gh: GH, room: R } = meta;
+const IMG_ASPECT = IW / IH;
+const TY = (IH / 2) / F, TX = (IW / 2) / F;
+const VFOV = THREE.MathUtils.radToDeg(2 * Math.atan(TY));
+const HOME_PITCH = -Math.atan((CY - IH / 2) / F);   // the canvas centre sits slightly below the horizon
+
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x0f0a07);
-const camera = new THREE.PerspectiveCamera(VFOV, innerWidth / innerHeight, 0.05, 200);
+const camera = new THREE.PerspectiveCamera(VFOV, innerWidth / innerHeight, 0.03, 200);
 camera.rotation.order = 'YXZ';
-
 function fitFov() {
   const a = innerWidth / innerHeight;
   camera.aspect = a;
-  // "cover": the painting always fills the screen from the painter's viewpoint
-  camera.fov = a > IMG_ASPECT ? THREE.MathUtils.radToDeg(2 * Math.atan(TX / a)) : VFOV;
+  camera.fov = a > IMG_ASPECT ? THREE.MathUtils.radToDeg(2 * Math.atan(TX / a)) : VFOV;   // "cover"
   camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
 }
 fitFov();
 addEventListener('resize', fitFov);
 
-// ---------- load assets ----------
-const loader = new THREE.TextureLoader();
-const loadTex = (url) => new Promise((res, rej) => loader.load(url, (t) => {
-  t.colorSpace = THREE.SRGBColorSpace;
-  t.anisotropy = renderer.capabilities.getMaxAnisotropy();
-  t.minFilter = THREE.LinearMipmapLinearFilter;
-  res(t);
-}, undefined, rej));
+// Every surface is textured by projecting the painting from the painter's eye (camera mapping).
+// `tp` is the point whose painted colour a vertex shows: itself inside the frame, or a point
+// folded back into the frame for surfaces the painter never showed (floor under you, side walls...).
+function projMaterial(map, clipInside, cardId = 0) {
+  return new THREE.ShaderMaterial({
+    side: THREE.DoubleSide,
+    uniforms: { map: { value: map }, cam: { value: new THREE.Vector4(F / IW, F / IH, CX / IW, CY / IH) },
+      clipInside: { value: clipInside ? 1 : 0 }, idMap: { value: texIds }, cardId: { value: cardId } },
+    vertexShader: `
+      attribute vec3 tp; varying vec3 vTp; varying vec3 vPos;
+      void main() { vTp = tp; vPos = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+    fragmentShader: `
+      uniform sampler2D map; uniform sampler2D idMap; uniform vec4 cam; uniform float clipInside; uniform float cardId;
+      varying vec3 vTp; varying vec3 vPos;
+      vec2 proj(vec3 p) { float z = max(-p.z, 1e-3); return vec2(cam.z + cam.x * p.x / z, 1.0 - (cam.w - cam.y * p.y / z)); }
+      void main() {
+        if (clipInside > 0.5 && -vPos.z > 0.05) {
+          vec2 q = proj(vPos);
+          if (q.x > 0.0015 && q.x < 0.9985 && q.y > 0.0015 && q.y < 0.9985) discard;   // the painted mesh covers it
+        }
+        vec2 uv = clamp(proj(vTp), vec2(0.0008), vec2(0.9992));
+        if (cardId > 0.5 && abs(texture2D(idMap, uv).r * 255.0 - cardId) > 0.5) discard;   // pixel-exact outline
+        gl_FragColor = texture2D(map, uv);
+        #include <colorspace_fragment>
+      }`,
+  });
+}
 
-const [meta, depthBuf, texFg, texBg] = await Promise.all([
-  fetch('assets/meta.json').then((r) => r.json()),
-  fetch('assets/depth.png').then((r) => r.blob())
-    .then((b) => createImageBitmap(b, { colorSpaceConversion: 'none', premultiplyAlpha: 'none' })),
-  loadTex('assets/painting.jpg'),
-  loadTex('assets/background.jpg'),
-]);
-
-const GW = meta.gw, GH = meta.gh, N = GW * GH;
-// depth.png: foreground rows then background rows, millimetres packed as R = high byte, G = low byte
+// ---------- the painted room, and the cards standing in it ----------
+const clamp = THREE.MathUtils.clamp;
 const dc = new OffscreenCanvas(GW, GH * 2).getContext('2d', { willReadFrequently: true });
-dc.drawImage(depthBuf, 0, 0);
+dc.drawImage(depthImg, 0, 0);
 const px = dc.getImageData(0, 0, GW, GH * 2).data;
-const zFg = new Float32Array(N), zBg = new Float32Array(N);
+const N = GW * GH, zFg = new Float32Array(N), zRoom = new Float32Array(N), cardId = new Uint8Array(N);
 for (let i = 0; i < N; i++) {
   zFg[i] = (px[i * 4] * 256 + px[i * 4 + 1]) / 1000;
-  zBg[i] = (px[(N + i) * 4] * 256 + px[(N + i) * 4 + 1]) / 1000;
+  cardId[i] = px[i * 4 + 2];
+  zRoom[i] = (px[(N + i) * 4] * 256 + px[(N + i) * 4 + 1]) / 1000;
 }
-
-// back-project every pixel of the canvas along the painter's line of sight
-function buildMesh(z, tex, cutRatio) {
-  const pos = new Float32Array(N * 3), uv = new Float32Array(N * 2);
+const gridPos = (z) => {
+  const pos = new Float32Array(N * 3);
   for (let j = 0; j < GH; j++) for (let i = 0; i < GW; i++) {
-    const k = j * GW + i, u = i / (GW - 1), v = j / (GH - 1), d = z[k];
-    pos[k * 3] = (u - 0.5) * 2 * TX * d;
-    pos[k * 3 + 1] = (0.5 - v) * 2 * TY * d;
+    const k = j * GW + i, d = z[k] || 1;
+    pos[k * 3] = ((i / (GW - 1)) * IW - CX) / F * d;
+    pos[k * 3 + 1] = -((j / (GH - 1)) * IH - CY) / F * d;
     pos[k * 3 + 2] = -d;
-    uv[k * 2] = u; uv[k * 2 + 1] = 1 - v;
   }
-  const idx = [];
-  const ok = (a, b, c) => {
-    if (!cutRatio) return true;
-    const mx = Math.max(z[a], z[b], z[c]), mn = Math.min(z[a], z[b], z[c]);
-    return mx / mn < cutRatio;      // tear the surface at depth discontinuities
-  };
+  return pos;
+};
+const forCells = (fn) => {
   for (let j = 0; j < GH - 1; j++) for (let i = 0; i < GW - 1; i++) {
     const a = j * GW + i, b = a + 1, c = a + GW, d = c + 1;
-    if (ok(a, c, b)) idx.push(a, c, b);
-    if (ok(b, c, d)) idx.push(b, c, d);
+    fn(a, c, b); fn(b, c, d);
   }
-  const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-  g.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+};
+// room: one continuous surface, opened only where the wall gives onto the alcove
+{
+  const pos = gridPos(zRoom), idx = [];
+  forCells((a, b, c) => {
+    const mx = Math.max(zRoom[a], zRoom[b], zRoom[c]), mn = Math.min(zRoom[a], zRoom[b], zRoom[c]);
+    if (!(mx / mn > 1.12 && mx > R.alcove - 0.2)) idx.push(a, b, c);
+  });
+  const g = new THREE.BufferGeometry(), attr = new THREE.BufferAttribute(pos, 3);
+  g.setAttribute('position', attr); g.setAttribute('tp', attr);
   g.setIndex(new THREE.BufferAttribute(new Uint32Array(idx), 1));
-  const m = new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide });
-  return new THREE.Mesh(g, m);
+  scene.add(new THREE.Mesh(g, projMaterial(texRoom, false)));
+}
+// cards: every figure, column and piece of furniture is a flat painted cut-out that turns to
+// face the visitor around a vertical axis through its foot (exactly the painting from the painter's eye)
+const cards = [];
+{
+  // cells touching the card; their exact outline comes from the full-resolution id mask
+  const tris = meta.cards.map(() => []);
+  forCells((a, b, c) => {
+    const seen = new Set([cardId[a], cardId[b], cardId[c]]);
+    for (const id of seen) if (id) tris[id - 1].push(a, b, c);
+  });
+  meta.cards.forEach((cd, k) => {
+    const t = tris[k]; if (!t.length) return;
+    const map = new Map(), P = [], T = [], I = [];
+    let x0 = Infinity, x1 = -Infinity;
+    for (const v of t) {
+      let m = map.get(v);
+      if (m === undefined) {
+        m = map.size; map.set(v, m);
+        const i = v % GW, j = (v - i) / GW;
+        const d = Math.min(cd.z, zRoom[v] * 0.995);   // a vertical card, hugging the room where it would sink
+        const x = ((i / (GW - 1)) * IW - CX) / F * d, y = -((j / (GH - 1)) * IH - CY) / F * d, z = -d;
+        T.push(x, y, z); P.push(x - cd.x, y, z + cd.z);
+        if (cardId[v] === k + 1) { x0 = Math.min(x0, x); x1 = Math.max(x1, x); }
+      }
+      I.push(m);
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(P, 3));
+    g.setAttribute('tp', new THREE.Float32BufferAttribute(T, 3));
+    g.setIndex(I);
+    const mesh = new THREE.Mesh(g, projMaterial(texPainting, false, k + 1));
+    mesh.position.set(cd.x, 0, -cd.z);
+    mesh.renderOrder = 1;
+    scene.add(mesh);
+    const r = clamp((x1 - x0) * 0.25, 0.28, 0.7);
+    cards.push({ mesh, x: cd.x, z: -cd.z, a0: Math.atan2(-cd.x, cd.z), r });
+  });
+}
+function faceCards(cam) {
+  for (const c of cards) c.mesh.rotation.y = Math.atan2(cam.x - c.x, cam.z - c.z) - c.a0;
 }
 
-const bgMesh = buildMesh(zBg, texBg, 0);
-const fgMesh = buildMesh(zFg, texFg, 1.07);
-bgMesh.renderOrder = 0; fgMesh.renderOrder = 1;
-scene.add(bgMesh, fgMesh);
+// ---------- the parts of the room outside the canvas ----------
+const pp = (v, a, b) => {           // ping-pong v into [a, b] (mirror repeat)
+  const L = b - a; if (L <= 0) return a;
+  let t = (v - a) % (2 * L); if (t < 0) t += 2 * L;
+  return a + (t <= L ? t : 2 * L - t);
+};
+const KX0 = CX / F, KX1 = (IW - CX) / F;                 // frame edges: X = -KX0*z ... +KX1*z
+const Z_FLOOR = F * -R.floor / (IH - CY);                 // nearest floor the painter shows
+const Z_CEIL = F * R.ceil_side / CY;                     // nearest side ceiling the painter shows
+// a plane patch: corner o, edge vectors u, v (painter frame, z = depth > 0), `fold` -> tp in depth coords
+function patch(o, u, v, nu, nv, fold, clip = true) {
+  const P = [], T = [], I = [];
+  for (let j = 0; j <= nv; j++) for (let i = 0; i <= nu; i++) {
+    const s = i / nu, t = j / nv;
+    const p = [o[0] + u[0] * s + v[0] * t, o[1] + u[1] * s + v[1] * t, o[2] + u[2] * s + v[2] * t];
+    const q = fold(p);
+    P.push(p[0], p[1], -p[2]); T.push(q[0], q[1], -q[2]);
+  }
+  for (let j = 0; j < nv; j++) for (let i = 0; i < nu; i++) {
+    const a = j * (nu + 1) + i, b = a + 1, c = a + nu + 1, d = c + 1;
+    I.push(a, c, b, b, c, d);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(P, 3));
+  g.setAttribute('tp', new THREE.Float32BufferAttribute(T, 3));
+  g.setIndex(I);
+  scene.add(new THREE.Mesh(g, projMaterial(texRoom, clip)));
+}
+const S = R.side, FL = R.floor, CS = R.ceil_side, CC = R.ceil_center, PX = R.portico_x, GZ = R.gallery_z;
+const BK = R.back, FR = R.front, n = (len) => Math.max(2, Math.ceil(len / 0.2));
+// floor: fold towards the nearest painted floor and inside the frame
+patch([-S, FL, FR], [2 * S, 0, 0], [0, 0, BK - FR], n(2 * S), n(BK - FR), ([x, y, z]) => {
+  const z2 = pp(z, Z_FLOOR, BK - 0.3);
+  return [pp(x, -KX0 * z2 * 0.98, KX1 * z2 * 0.98), y, z2];
+});
+// side walls and fourth wall: reuse a clean strip of the back wall (panels over the tiled dado)
+const wallY = (y) => (y > CS - 0.05 ? pp(y, 1.2, CS - 0.05) : y >= -0.85 ? y : pp(y, -0.85, -0.3));
+patch([S, FL, FR], [0, 0, BK - FR], [0, CS - FL, 0], n(BK - FR), n(CS - FL), ([x, y, z]) => [6.2 - pp(BK - z, 0, 1.4), wallY(y), BK]);
+patch([-S, FL, FR], [0, 0, BK - FR], [0, CS - FL, 0], n(BK - FR), n(CS - FL), ([x, y, z]) => [6.2 - pp(BK - z, 0, 1.4), wallY(y), BK]);
+// portico ceilings
+for (const sg of [1, -1]) {
+  patch([sg * PX, CS, FR], [sg * (S - PX), 0, 0], [0, 0, BK - FR], n(S - PX), n(BK - FR), ([x, y, z]) => {
+    const z2 = pp(z, Z_CEIL, BK - 0.3);
+    return [sg * pp(sg * x, PX, Math.min(S, KX1 * z2 * 0.98)), y, z2];
+  });
+  // inner faces of the porticos above the courtyard
+  patch([sg * PX, CS, FR], [0, 0, GZ - FR], [0, CC - CS, 0], n(GZ - FR), n(CC - CS), ([x, y, z]) =>
+    [sg * (PX - pp(GZ - z, 0, 2.4)), pp(y, R.ceil_gallery + 0.05, CY / F * GZ - 0.05), GZ]);
+}
+// courtyard ceiling (high, dark wood) and top of the gallery front
+patch([-PX, CC, FR], [2 * PX, 0, 0], [0, 0, GZ - FR], n(2 * PX), n(GZ - FR), ([x, y, z]) => { const z2 = pp(z, Z_CEIL, BK - 0.3); return [PX + 0.15 + pp(x + PX, 0, KX1 * z2 * 0.97 - PX - 0.15), CS, z2]; });
+patch([-PX, CY / F * GZ - 0.02, GZ], [2 * PX, 0, 0], [0, CC - CY / F * GZ + 0.02, 0], n(2 * PX), 6, ([x, y, z]) =>
+  [x, pp(y, R.ceil_gallery + 0.05, CY / F * GZ - 0.05), GZ]);
+// the fourth wall behind the painter: the back wall again
+patch([-S, FL, FR], [2 * S, 0, 0], [0, CC - FL, 0], n(2 * S), n(CC - FL), ([x, y, z]) => [4.8 + pp(x + S, 0, 1.4), wallY(y), BK]);
+
+// the alcove behind the arches: a real recess (back, sides, vault, floor), painted with its own back wall
+{
+  const AX0 = R.alcove_x0, AX1 = R.alcove_x1, AT = R.alcove_top, AZ = R.alcove + 0.03, A0 = BK + 0.01, D = AZ - A0;
+  const alcY = (y) => (y < 1.4 ? y : pp(y, 0.6, 1.4));
+  const alcX = (x) => pp(x, AX0 + 0.1, AX1 - 0.1);
+  patch([AX0 - 0.3, FL, AZ], [AX1 - AX0 + 0.6, 0, 0], [0, AT + 0.4 - FL, 0], n(AX1 - AX0), n(AT - FL), ([x, y]) => [alcX(x), alcY(y), R.alcove], false);
+  patch([AX0, FL, A0], [0, 0, D], [0, AT + 0.4 - FL, 0], n(D), n(AT - FL), ([x, y, z]) => [AX0 + 0.1 + pp(AZ - z, 0, 1.0), alcY(y), R.alcove], false);
+  patch([AX1, FL, A0], [0, 0, D], [0, AT + 0.4 - FL, 0], n(D), n(AT - FL), ([x, y, z]) => [AX1 - 0.1 - pp(AZ - z, 0, 1.0), alcY(y), R.alcove], false);
+  patch([AX0 - 0.3, AT + 0.4, A0], [AX1 - AX0 + 0.6, 0, 0], [0, 0, D], n(AX1 - AX0), n(D), ([x, y, z]) => [alcX(x), 1.4 - pp(AZ - z, 0, 0.8), R.alcove], false);
+  patch([AX0 - 0.3, FL - 0.01, BK - 0.3], [AX1 - AX0 + 0.6, 0, 0], [0, 0, D + 0.3], n(AX1 - AX0), n(D), ([x, y, z]) => [x, FL, pp(z, 11.5, 13.3)], false);
+}
 
 // ---------- controls ----------
-const HOME = { x: 0, y: 0, z: 0, yaw: 0, pitch: 0 };
-const state = { ...HOME };
-const target = { ...HOME };
-const BOUNDS = { x: [-2.6, 2.6], y: [-0.8, 1.3], z: [-4.6, 1.2] };
-const clamp = THREE.MathUtils.clamp;
+const HOME = { x: 0, y: 0, z: 0, yaw: 0, pitch: HOME_PITCH };
+const state = { ...HOME }, target = { ...HOME };
+const BOUNDS = { x: [-S + 0.45, S - 0.45], y: [FL + 0.7, CS - 0.4], z: [-(BK - 0.5), -(FR + 0.4)] };
+const COLS = meta.columns.map((c) => ({ x: c.x, z: -c.z, r: c.r + 0.32 }))
+  .concat(cards.filter((c) => c.z > -(BK - 0.6)).map((c) => ({ x: c.x, z: c.z, r: c.r })));
 const keys = new Set();
 let tour = null;
 
 addEventListener('keydown', (e) => {
-  if (e.repeat && !/^(Key[WASDZQ]|Arrow)/.test(e.code)) return;
   keys.add(e.code);
+  if (e.repeat) return;
   if (e.code === 'KeyR') resetView();
   if (e.code === 'KeyT') toggleTour();
   if (e.code === 'Space') e.preventDefault();
@@ -202,10 +335,9 @@ addEventListener('blur', () => keys.clear());
 
 function look(dx, dy, s = 0.0022) {
   stopTour();
-  target.yaw = clamp(target.yaw - dx * s, -1.35, 1.35);
-  target.pitch = clamp(target.pitch - dy * s, -1.0, 1.0);
+  target.yaw -= dx * s;
+  target.pitch = clamp(target.pitch - dy * s, -1.2, 1.2);
 }
-
 const cvs = renderer.domElement;
 let dragging = false, lx = 0, ly = 0;
 cvs.addEventListener('pointerdown', (e) => {
@@ -220,7 +352,6 @@ cvs.addEventListener('pointermove', (e) => {
 cvs.addEventListener('pointerup', () => { dragging = false; });
 addEventListener('wheel', (e) => { stopTour(); moveLocal(0, -e.deltaY * 0.004); }, { passive: true });
 
-// virtual joystick (touch)
 const stick = document.getElementById('stick'), knob = stick.firstElementChild;
 const joy = { x: 0, y: 0, id: null };
 stick.addEventListener('pointerdown', (e) => { joy.id = e.pointerId; stick.setPointerCapture(e.pointerId); joyMove(e); });
@@ -235,19 +366,27 @@ function joyMove(e) {
   joy.x = x; joy.y = y; knob.style.transform = `translate(${x * 36}px, ${y * 36}px)`;
 }
 
+function collide(p) {
+  p.x = clamp(p.x, ...BOUNDS.x); p.z = clamp(p.z, ...BOUNDS.z); p.y = clamp(p.y, ...BOUNDS.y);
+  for (const c of COLS) {
+    const dx = p.x - c.x, dz = p.z - c.z, d = Math.hypot(dx, dz);
+    if (d < c.r) { const k = c.r / (d || 1e-3); p.x = c.x + dx * k; p.z = c.z + dz * k; }
+  }
+}
 function moveLocal(strafe, fwd, up = 0) {
   const s = Math.sin(target.yaw), c = Math.cos(target.yaw);
-  target.x = clamp(target.x + strafe * c - fwd * s, ...BOUNDS.x);
-  target.z = clamp(target.z - strafe * s - fwd * c, ...BOUNDS.z);
-  target.y = clamp(target.y + up, ...BOUNDS.y);
+  target.x += strafe * c - fwd * s;
+  target.z += -strafe * s - fwd * c;
+  target.y += up;
+  collide(target);
 }
 function resetView() { stopTour(); Object.assign(target, HOME); }
 
-// guided tour: a slow walk through the room and back to the painter's eye
+// guided tour through the courtyard (x, y, z, yaw, pitch); z is negative = into the painting
 const TOUR = [
-  [0, 0, 0, 0, 0], [1.6, -0.2, -1.8, 0.35, -0.08], [1.2, -0.3, -3.6, -0.2, -0.1],
-  [-0.6, -0.25, -4.2, 0.15, 0.02], [-1.8, -0.1, -3.2, 0.45, 0.08], [-1.4, 0.4, -1.5, -0.35, 0.18],
-  [0, 0, 0, 0, 0],
+  [0, 0, 0, 0, HOME_PITCH], [0.4, -0.1, -2.5, 0.1, -0.05], [1.2, -0.15, -5.0, 0.45, -0.12],
+  [0.6, -0.1, -7.6, -0.2, -0.02], [-0.8, 0, -9.4, 0.25, 0.05], [-1.6, 0.1, -8.0, 1.2, 0.12],
+  [-1.2, 0.2, -5.5, 2.4, 0.1], [0.8, 0.1, -3.0, 0.7, 0.02], [0, 0, 0, 0, HOME_PITCH],
 ].map(([x, y, z, yaw, pitch]) => ({ x, y, z, yaw, pitch }));
 function toggleTour() { tour ? stopTour() : (tour = { t: 0 }, setTourBtn(true)); }
 function stopTour() { if (tour) { tour = null; setTourBtn(false); } }
@@ -255,30 +394,15 @@ const btnTour = document.getElementById('btnTour');
 function setTourBtn(on) { btnTour.setAttribute('aria-pressed', on); btnTour.textContent = on ? 'Arrêter' : 'Visite'; }
 btnTour.onclick = toggleTour;
 document.getElementById('btnReset').onclick = resetView;
-
-function catmull(p0, p1, p2, p3, t) {
+const catmull = (p0, p1, p2, p3, t) => {
   const t2 = t * t, t3 = t2 * t;
   return 0.5 * (2 * p1 + (-p0 + p2) * t + (2 * p0 - 5 * p1 + 4 * p2 - p3) * t2 + (-p0 + 3 * p1 - 3 * p2 + p3) * t3);
-}
+};
 function tourPose(t) {
-  const n = TOUR.length - 1, f = Math.min(t, n - 1e-6), i = Math.floor(f), u = f - i;
-  const P = (k) => TOUR[clamp(k, 0, n)];
-  const e = u * u * (3 - 2 * u) * 0.35 + u * 0.65;
-  const out = {};
-  for (const k of ['x', 'y', 'z', 'yaw', 'pitch']) out[k] = catmull(P(i - 1)[k], P(i)[k], P(i + 1)[k], P(i + 2)[k], e);
+  const last = TOUR.length - 1, f = Math.min(t, last - 1e-6), i = Math.floor(f), u = f - i;
+  const P = (k) => TOUR[clamp(k, 0, last)], out = {};
+  for (const k of ['x', 'y', 'z', 'yaw', 'pitch']) out[k] = catmull(P(i - 1)[k], P(i)[k], P(i + 1)[k], P(i + 2)[k], u);
   return out;
-}
-
-// keep the gaze inside the painted world: a point 8 m ahead must stay within the canvas' frustum
-function inside(yaw, pitch) {
-  const D = 8, cp = Math.cos(pitch);
-  const px = target.x - Math.sin(yaw) * cp * D, pz = target.z - Math.cos(yaw) * cp * D, py = target.y + Math.sin(pitch) * D;
-  return pz < -1 && Math.abs(px / -pz) < TX * 0.62 && Math.abs(py / -pz) < TY * 0.62;
-}
-function constrainView() {
-  for (let n = 0; n < 40 && !inside(target.yaw, target.pitch); n++) {
-    target.yaw *= 0.95; target.pitch *= 0.95;
-  }
 }
 
 // ---------- loop ----------
@@ -286,28 +410,29 @@ const clock = new THREE.Clock();
 function frame() {
   const dt = Math.min(clock.getDelta(), 0.05);
   if (tour) {
-    tour.t += dt * 0.11;
+    tour.t += dt * 0.09;
     Object.assign(target, tourPose(tour.t));
     if (tour.t >= TOUR.length - 1) stopTour();
   } else {
-    const sp = (keys.has('ShiftLeft') && keys.has('ControlLeft') ? 3 : 1.6) * dt;
+    const run = keys.has('ControlLeft') || keys.has('ControlRight') ? 2.2 : 1;
+    const sp = 1.7 * run * dt;
     let f = 0, s = 0, u = 0;
     if (keys.has('KeyW') || keys.has('KeyZ') || keys.has('ArrowUp')) f += 1;
     if (keys.has('KeyS') || keys.has('ArrowDown')) f -= 1;
     if (keys.has('KeyA') || keys.has('KeyQ')) s -= 1;
     if (keys.has('KeyD')) s += 1;
-    if (keys.has('ArrowLeft')) target.yaw = clamp(target.yaw + 1.4 * dt, -1.35, 1.35);
-    if (keys.has('ArrowRight')) target.yaw = clamp(target.yaw - 1.4 * dt, -1.35, 1.35);
+    if (keys.has('ArrowLeft')) target.yaw += 1.6 * dt;
+    if (keys.has('ArrowRight')) target.yaw -= 1.6 * dt;
     if (keys.has('Space')) u += 1;
     if (keys.has('ShiftLeft') || keys.has('ShiftRight')) u -= 1;
     f -= joy.y; s += joy.x;
     if (f || s || u) moveLocal(s * sp, f * sp, u * sp * 0.7);
   }
-  if (!tour) constrainView();
   const k = 1 - Math.exp(-dt * (tour ? 20 : 9));
   for (const key of ['x', 'y', 'z', 'yaw', 'pitch']) state[key] += (target[key] - state[key]) * k;
   camera.position.set(state.x, state.y, state.z);
   camera.rotation.set(state.pitch, state.yaw, 0);
+  faceCards(camera.position);
   renderer.render(scene, camera);
   requestAnimationFrame(frame);
 }
@@ -322,7 +447,7 @@ enter.onclick = () => {
   document.getElementById('tools').classList.add('on');
   if (!isTouch) cvs.requestPointerLock?.();
 };
-window.__view = { target, state, toggleTour, tourPose };
+window.__view = { target, state, toggleTour, tourPose, scene };
 </script>
 </body>
 </html>
